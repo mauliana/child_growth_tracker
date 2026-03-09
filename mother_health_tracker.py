@@ -684,7 +684,8 @@ with tab1:
 
             selected_profile_id = st.selectbox(
                 "Select Profile",
-                options=mother_df.index
+                options=mother_df.index,
+                format_func=lambda x: mother_df.loc[x, 'name']
             )
 
             measurement_df = get_mother_measurements(selected_profile_id)
@@ -833,11 +834,33 @@ with tab2:
             else:
                 c1.metric("Pre-Pregnancy BMI", "Unknown")
 
-            # ---- Column 2: Current Weight ----
+            # ---- Column 2: Current Weight + Status ----
+            # Calculate Weight Status logic here
+            weight_status = "Baseline (Pre-pregnancy)"
+            if current_weeks > 0:
+                # Find the corresponding baseline row for the current week
+                week_row = baseline_df[baseline_df["week"] == int(current_weeks)]
+                if not week_row.empty:
+                    min_w = week_row["min_weight"].values[0]
+                    max_w = week_row["max_weight"].values[0]
+                    if current_weight < min_w:
+                        weight_status = "Below recommended"
+                    elif current_weight > max_w:
+                        weight_status = "Above recommended"
+                    else:
+                        weight_status = "Within recommended"
+            
             c2.metric("Current Weight (kg)", f"{current_weight:.1f}")
+            c2.caption(weight_status)
 
-            # ---- Column 3: Trimester ----
-            c3.metric("Current Trimester", trimester)
+            # ---- Column 3: Gestational Age + Trimester ----
+            # CHANGED: Put Age first, Trimester in caption
+            if current_weeks > 0:
+                c3.metric("Gestational Age", f"{current_weeks} weeks")
+            else:
+                c3.metric("Gestational Age", "N/A")
+            
+            c3.caption(f"Trimester: {trimester}")
 
             # ---- Column 4: MUAC + Nutritional Risk ----
             c4.metric("MUAC (cm)", f"{muac:.1f}")
@@ -849,38 +872,62 @@ with tab2:
             st.divider()
 
             if not measurements.empty:
-                measurements = measurements[measurements["gestational_weeks"] <= 40]
+                # Filter out data > 40 weeks for cleaner chart
+                plot_measurements = measurements[measurements["gestational_weeks"] <= 40].copy()
 
                 fig = go.Figure()
 
-                # Shaded baseline
+                # 1. Shaded baseline (Min)
                 fig.add_trace(go.Scatter(
                     x=baseline_df["week"],
                     y=baseline_df["min_weight"],
                     line=dict(width=0),
-                    showlegend=False
+                    showlegend=False,
+                    hoverinfo="skip" # Hide hover for the baseline lines to keep it clean
                 ))
 
+                # 2. Shaded baseline (Max) - Creates the fill
                 fig.add_trace(go.Scatter(
                     x=baseline_df["week"],
                     y=baseline_df["max_weight"],
                     fill='tonexty',
                     name="Recommended Range",
                     line=dict(width=0),
-                    fillcolor="rgba(0,150,255,0.2)" if mother_info['twin']=="Yes" else "rgba(0,200,0,0.2)"
+                    fillcolor="rgba(0,150,255,0.2)" if mother_info['twin']=="Yes" else "rgba(0,200,0,0.2)",
+                    hoverinfo="skip"
                 ))
 
-                # Actual measurements
-                if not measurements.empty:
-                    measurements = measurements[measurements["gestational_weeks"] <= 40]
+                # 3. Actual Measurements - With Custom Hover Info
+                if not plot_measurements.empty:
+                    # Merge measurements with baseline to get min/max for hover info
+                    merged_data = plot_measurements.merge(
+                        baseline_df, 
+                        left_on='gestational_weeks', 
+                        right_on='week', 
+                        how='left'
+                    )
+
+                    # Custom data for hover: [min_weight, max_weight]
+                    custom_hover_data = merged_data[['min_weight', 'max_weight']].values
+
+                    # Define the hover template
+                    hover_template = (
+                        "<b>Week:</b> %{x}<br>"
+                        "<b>Current Weight:</b> %{y:.2f} kg<br>"
+                        "<b>Min Recommended:</b> %{customdata[0]:.2f} kg<br>"
+                        "<b>Max Recommended:</b> %{customdata[1]:.2f} kg"
+                        "<extra></extra>" # Removes the trace name from the end
+                    )
 
                     fig.add_trace(go.Scatter(
-                        x=measurements["gestational_weeks"],
-                        y=measurements["weight"],
+                        x=merged_data["gestational_weeks"],
+                        y=merged_data["weight"],
                         mode="lines+markers",
                         name="Actual Weight",
                         line=dict(color="black", width=2),
-                        marker=dict(color="black", size=5)
+                        marker=dict(color="black", size=8),
+                        customdata=custom_hover_data,
+                        hovertemplate=hover_template
                     ))
 
                 fig.update_layout(
@@ -889,7 +936,45 @@ with tab2:
                     yaxis_title="Weight (kg)",
                     xaxis=dict(range=[1, 40]),
                     height=550,
-                    template="plotly_white"
+                    template="plotly_white",
+                    hovermode="closest" # Ensure only the closest point shows hover
                 )
 
                 st.plotly_chart(fig, width='stretch')
+
+                # =========================================
+                # BASELINE INFORMATION TABLE
+                # =========================================
+                st.subheader("Gestational Weight Guidelines")
+                st.write("Calculation is based on the pre-pregnancy weight and adds the recommended weekly gain based on the BMI category")
+
+                # Create table dataframe
+                table_df = baseline_df.copy()
+                pre_weight = mother_info['pre_weight']
+
+                # Column: Recommended Weight Range
+                table_df['Recommended Weight Range'] = table_df.apply(
+                    lambda row: f"{row['min_weight']:.1f} - {row['max_weight']:.1f} kg", axis=1
+                )
+
+                # Column: Recommended Weight Gain (Cumulative)
+                table_df['Recommended Weight Gain'] = table_df.apply(
+                    lambda row: f"{(row['min_weight'] - pre_weight):.1f} - {(row['max_weight'] - pre_weight):.1f} kg", axis=1
+                )
+
+                # Select and rename columns
+                table_df = table_df[['week', 'Recommended Weight Range', 'Recommended Weight Gain']]
+                table_df = table_df.rename(columns={"week": "Gestational Week"})
+
+                # Define styling function to highlight current week
+                def highlight_current_week(s):
+                    if s.name == current_weeks:
+                        return ['background-color: #FFD700'] * len(s) # Yellow highlight
+                    else:
+                        return [''] * len(s)
+
+                # Apply styling
+                styled_table = table_df.style.apply(highlight_current_week, axis=1)
+
+                # Display table
+                st.dataframe(styled_table, width='stretch', hide_index=True)
