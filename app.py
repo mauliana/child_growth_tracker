@@ -946,6 +946,343 @@ def _add_who_reference_traces(fig, df_who, x_col, z_styles):
                 name=style['name'],
                 mode='lines'
             ))
+def get_simple_status(z, metric_type):
+    """Returns a short status string for tooltips based on Z-score."""
+    if z is None: return "Unknown"
+    
+    if metric_type == 'wfa': # Weight
+        if z < -3: return "Severely Underweight"
+        elif z < -2: return "Underweight"
+        elif z <= 1: return "Normal Weight"
+        elif z <= 2: return "Risk of Overweight"
+        else: return "Overweight"
+        
+    elif metric_type == 'lhfa': # Height
+        if z < -3: return "Severely Stunted"
+        elif z < -2: return "Stunted"
+        elif z > 3: return "Very Tall"
+        elif z > 2: return "Tall"
+        else: return "Normal Stature"
+        
+    elif metric_type == 'bmi': # BMI
+        if z < -3: return "Severely Wasted"
+        elif z < -2: return "Wasted"
+        elif z <= 1: return "Normal"
+        elif z <= 2: return "Risk of Overweight"
+        else: return "Overweight"
+        
+    return "Normal" # Default
+
+import math # Ensure this is imported at the top of your file
+
+def get_hybrid_axis_config(max_age_months, axis_type):
+    """
+    Simplified Axis Config.
+    0-6 Months: Weeks -> Months.
+    > 6 Months: Monthly ticks.
+    Fixes unsync issue by ensuring grid covers the current month.
+    """
+    max_days = max_age_months * 30.44
+    
+    tick_vals_days = []
+    tick_text = []
+    minor_grid_days = []
+    ref_lines_days = []
+
+    # --- RULE: 0 to 6 Months ---
+    if max_age_months <= 6:
+        # 0 to 13 Weeks
+        for w in range(0, 14): 
+            day_val = w * 7
+            if day_val <= max_days:
+                tick_vals_days.append(day_val)
+                tick_text.append(f"{w}w")
+                minor_grid_days.append(day_val + 3.5) 
+
+        # 3 to 6 Months
+        for m in range(4, 7): 
+            day_val = m * 30.44
+            if day_val <= max_days:
+                tick_vals_days.append(day_val)
+                tick_text.append(f"{m}m")
+                # Minor ticks for months
+                for q in [0.25, 0.5, 0.75]:
+                    minor_grid_days.append((m - 1 + q) * 30.44)
+
+    # --- RULE: > 6 Months ---
+    else:
+        # FIX: Use ceil() to ensure we draw the grid line for the CURRENT month 
+        # and the NEXT month, so the data point never sits in empty space.
+        limit = int(math.ceil(max_age_months)) + 1
+        
+        for m in range(0, limit):
+            day_val = m * 30.44
+            if day_val <= max_days:
+                tick_vals_days.append(day_val)
+                
+                # SIMPLE LABEL RULE
+                if m == 0:
+                    tick_text.append("Birth")
+                elif m % 12 == 0:
+                    year_num = m // 12
+                    tick_text.append(f"{year_num} year{'s' if year_num > 1 else ''}")
+                else:
+                    tick_text.append(f"{m}m")
+                
+                # LINES: Bold line at EVERY year (12, 24, 36...)
+                if m > 0 and m % 12 == 0:
+                    ref_lines_days.append(day_val)
+
+    # --- CONVERT TO CHART UNIT ---
+    conversion_factor = 1
+    if axis_type == "Week": conversion_factor = 7
+    elif axis_type == "Month": conversion_factor = 30.44
+    
+    final_tick_vals = [v / conversion_factor for v in tick_vals_days]
+    final_minor_vals = [v / conversion_factor for v in minor_grid_days]
+    final_ref_lines = [v / conversion_factor for v in ref_lines_days]
+
+    return final_tick_vals, tick_text, final_minor_vals, final_ref_lines
+
+def create_growth_chart(child_measures, gender, max_age, 
+                       metric_type, chart_title, y_title, 
+                       y_range=None, y_dtick=1):
+    """
+    Generates a styled WHO growth chart.
+    Features: Direct Labels (Legend at end of lines), Hybrid Axis.
+    """
+    
+    # 1. Load Reference Data
+    df_who, x_col, x_label, axis_type, user_x_key = _build_who_reference_for_chart(
+        gender, metric_type, max_age
+    )
+
+    if df_who is None or df_who.empty:
+        return None
+
+    fig = go.Figure()
+
+    # 2. Plot WHO Reference Lines (Spline Interpolation)
+    for col, style in z_styles_guideline.items():
+        if col in df_who.columns:
+            fig.add_trace(go.Scatter(
+                x=df_who[x_col],
+                y=df_who[col],
+                mode='lines',
+                name=style['name'], # Keep name for reference, though legend will be hidden
+                line=dict(
+                    color=style['color'], 
+                    width=style['width'], 
+                    shape='spline' 
+                ),
+                hoverinfo='skip',
+                showlegend=False # HIDE STANDARD LEGEND BOX
+            ))
+
+    # 3. PREPARE USER DATA & CALCULATE Z-SCORES FOR TOOLTIP
+    user_x = []
+    user_y = []
+    hover_texts = []
+
+    for _, row in child_measures.iterrows():
+        # Determine X value (In Days internally)
+        if user_x_key == "date":
+            if 'dob' in child_measures.columns:
+                dob = pd.to_datetime(child_measures['dob'].iloc[0])
+                m_date = pd.to_datetime(row['date'])
+                val_x_days = (m_date - dob).days
+            else:
+                val_x_days = row['age_months'] * 30.44
+        elif user_x_key is None:
+            val_x_days = row['height'] # WFL
+        else:
+            if user_x_key == "age_weeks":
+                val_x_days = row['age_weeks'] * 7
+            else:
+                val_x_days = row['age_months'] * 30.44
+        
+        # Convert User X to Chart Unit
+        conversion = 1
+        if axis_type == "Week": conversion = 7
+        elif axis_type == "Month": conversion = 30.44
+        
+        if metric_type != 'wfl':
+            val_x = val_x_days / conversion
+        else:
+            val_x = val_x_days
+
+        # Determine Y value
+        if metric_type == 'wfa': val_y = row['weight']
+        elif metric_type == 'lhfa': val_y = row['height']
+        elif metric_type == 'wfl': val_y = row['weight']
+        elif metric_type == 'hcfa': val_y = row['head_circumference']
+        elif metric_type == 'bmi': val_y = row['bmi']
+        
+        user_x.append(val_x)
+        user_y.append(val_y)
+
+        # --- CALCULATE Z-SCORE & STATUS FOR TOOLTIP ---
+        z = get_zscore_from_who(
+            gender=gender, 
+            metric_type=metric_type, 
+            age_months=row['age_months'], 
+            value=val_y, 
+            age_weeks=row.get('age_weeks'),
+            dob=row.get('dob'),
+            meas_date=row.get('date')
+        )
+        
+        status = get_simple_status(z, metric_type)
+        
+        # Format Age Text for Tooltip
+        if metric_type != 'wfl':
+            if val_x_days <= 91:
+                age_str = f"{int(val_x_days/7)} weeks"
+            else:
+                age_str = f"{int(val_x_days/30.44)} months"
+        else:
+            age_str = f"{val_x} cm"
+
+        hover_text = (
+            f"<b>{status}</b><br>"
+            f"Age: {age_str}<br>"
+            f"{y_title}: {val_y:.2f}<br>"
+            f"Z-score: {z if z is not None else 'N/A'}"
+        )
+        hover_texts.append(hover_text)
+
+    # 4. Plot User Data
+    fig.add_trace(go.Scatter(
+        x=user_x, y=user_y,
+        mode='markers+lines', 
+        name='Child',
+        marker=dict(size=8, color='#1f77b4'), 
+        line=dict(width=2, color='#1f77b4'),
+        hovertext=hover_texts,     
+        hoverinfo="text",           
+        hoverlabel=dict(bgcolor="white", bordercolor="#1f77b4"),
+        showlegend=False # Hide child from legend too
+    ))
+
+    # 5. FORCE AXIS RANGES
+    x_min = df_who[x_col].min()
+    x_max = df_who[x_col].max()
+    x_padding = (x_max - x_min) * 0.05 
+
+    # --- CALCULATE FULL DATA HEIGHT ---
+    y_min_data = df_who[['SD3neg', 'SD3', 'SD0']].min().min()
+    y_max_data = df_who[['SD3neg', 'SD3', 'SD0']].max().max()
+
+    # Configure X-Axis
+    if user_x_key is not None:
+        if metric_type == 'wfl':
+            fig.update_xaxes(
+                title_text=x_label, 
+                showgrid=True,
+                range=[x_min, x_max]
+            )
+        else:
+            # --- GET HYBRID TICKS ---
+            tick_vals, tick_text, minor_vals, ref_vals = get_hybrid_axis_config(max_age, axis_type)
+            
+            fig.update_xaxes(
+                title_text="Age",
+                range=[x_min - x_padding, x_max + x_padding], 
+                tickvals=tick_vals,      
+                ticktext=tick_text,      
+                showgrid=True, 
+                gridcolor='gray',       
+                gridwidth=1
+            )
+            
+            # --- DRAW MINOR GRID LINES ---
+            for mx in minor_vals:
+                if mx >= x_min and mx <= x_max:
+                    fig.add_shape(
+                        type="line",
+                        x0=mx, y0=y_min_data,
+                        x1=mx, y1=y_max_data,
+                        line=dict(color="lightgray", width=1, dash="dot"),
+                        layer="below"
+                    )
+            
+            # --- DRAW REFERENCE LINES (FULL HEIGHT) ---
+            for rx in ref_vals:
+                if rx >= x_min and rx <= x_max:
+                    fig.add_shape(
+                        type="line",
+                        x0=rx, y0=y_min_data,
+                        x1=rx, y1=y_max_data,
+                        line=dict(color="black", width=3),
+                        layer="below"
+                    )
+                    
+    else:
+        fig.update_xaxes(title_text=x_label, showgrid=True)
+
+    # Configure Y-Axis
+    if metric_type == 'wfa' and max_age <= 6:
+        y_range = [2, 11]
+        y_dtick = 1
+        fig.update_yaxes(
+            title_text=y_title,
+            range=y_range,
+            dtick=y_dtick,
+            showgrid=True,
+            gridcolor='gray',
+            gridwidth=1,
+            minor=dict(
+                dtick=0.1,
+                showgrid=True,
+                gridcolor='lightgray',
+                gridwidth=0.5
+            )
+        )
+    else:
+        fig.update_yaxes(
+            title_text=y_title,
+            range=y_range,
+            dtick=y_dtick,
+            showgrid=True,
+            gridcolor='lightgray'
+        )
+
+    # --- NEW: ADD DIRECT LEGEND LABELS AT END OF LINES ---
+    # Loop through the SD columns and place a text label at the end (X_max, Y_at_X_max)
+    for col, style in z_styles_guideline.items():
+        if col in df_who.columns:
+            # Get the Y-value at the very end of the curve
+            y_val_end = df_who[col].iloc[-1]
+            
+            # Place text slightly before the absolute edge (e.g., 99%) so it doesn't get clipped
+            x_pos = x_max * 0.99 
+            
+            fig.add_annotation(
+                x=x_pos,
+                y=y_val_end,
+                text=style['name'], # e.g. "-3 SD"
+                showarrow=False,
+                xanchor='left', # Text grows to the left from the end point
+                yanchor='middle',
+                font=dict(
+                    color=style['color'], # Use the line color
+                    size=12
+                ),
+                # Add a slight white background so text is readable over grid lines
+                bgcolor="rgba(255, 255, 255, 0.7)" 
+            )
+
+    # 6. Layout
+    fig.update_layout(
+        title=dict(text=chart_title, x=0.5, xanchor='center', font=dict(size=20)),
+        hovermode="x", 
+        plot_bgcolor='white',
+        # Removed legend configuration since we are using direct labels
+        margin=dict(l=20, r=20, t=60, b=40),
+        height=500
+    )
+
+    return fig
 
 
 # --- NOTIFICATION HANDLER ---
@@ -1294,18 +1631,18 @@ with tab2:
                 st.info("No measurements recorded for this child yet.")
             else:
                 # FIX #7: Add SD1 to z_styles so it's drawn on BMI chart
-                z_styles = {
-                    'SD3neg': {'color': "#060606", 'dash': 'dot',   'name': '-3 SD'},
-                    'SD2neg': {'color': '#ff4b4b', 'dash': 'dash',  'name': '-2 SD'},
-                    'SD0':    {'color': '#00c04b', 'dash': 'solid', 'name': 'Median'},
-                    'SD1':    {'color': '#ffa500', 'dash': 'dot',   'name': '+1 SD'},
-                    'SD2':    {'color': '#ff4b4b', 'dash': 'dash',  'name': '+2 SD'},
-                    'SD3':    {'color': "#060606", 'dash': 'dot',   'name': '+3 SD'},
+                z_styles_guideline = {
+                    'SD3neg': {'color': "#000000", 'width': 2, 'dash': 'solid', 'name': '-3 SD'}, # Black, Medium
+                    'SD2neg': {'color': '#ff3333', 'width': 2, 'dash': 'solid', 'name': '-2 SD'}, # Red, Medium
+                    'SD0':    {'color': '#00cc44', 'width': 4, 'dash': 'solid', 'name': 'Median'}, # Green, Highlighted/Thick
+                    'SD2':    {'color': '#ff3333', 'width': 2, 'dash': 'solid', 'name': '+2 SD'}, # Red, Medium
+                    'SD3':    {'color': "#000000", 'width': 2, 'dash': 'solid', 'name': '+3 SD'}, # Black, Medium
                 }
 
-                # SD1 should only appear on the BMI chart; use this subset for all others
-                z_styles_no_sd1 = {k: v for k, v in z_styles.items() if k != 'SD1'}
-
+                # ==========================================
+                # CHART SECTION (TABS WITH NEW STYLE)
+                # ==========================================
+                
                 chart_tab1, chart_tab2, chart_tab3, chart_tab4, chart_tab5 = st.tabs([
                     "Weight-for-Age", 
                     "Length/Height-for-Age", 
@@ -1314,207 +1651,83 @@ with tab2:
                     "BMI-for-Age"
                 ])
 
-                # --- WEIGHT CHART ---
+                # --- TAB 1: WEIGHT ---
                 with chart_tab1:
-                    # FIX #1: Use max_age consistently
-                    df_who, x_col, x_label, axis_type, user_x_key = _build_who_reference_for_chart(
-                        gender, 'wfa', max_age
+                    fig = create_growth_chart(
+                        child_measures=child_measures,
+                        gender=gender,
+                        max_age=max_age,
+                        metric_type='wfa',
+                        chart_title="Weight-for-Age",
+                        y_title="Weight (kg)",
+                        y_range=[2, 11],    # Guideline: 2kg - 11kg
+                        y_dtick=1           # Guideline: 1kg grid
                     )
-                    
-                    if df_who is not None and not df_who.empty:
-                        fig = go.Figure()
-                        _add_who_reference_traces(fig, df_who, x_col, z_styles_no_sd1)
+                    if fig: st.plotly_chart(fig, use_container_width=True)
+                    else: st.warning("Standards not loaded.")
 
-                        if user_x_key == "date":
-                            # Calculate days since birth for the X-axis
-                            if 'dob' in child_measures.columns:
-                                dob = pd.to_datetime(child_measures['dob'].iloc[0])
-                                meas_dates = pd.to_datetime(child_measures['date'])
-                                user_x = (meas_dates - dob).dt.days
-                            else:
-                                user_x = child_measures['age_months'] * 30.44
-                        elif user_x_key is None:
-                            # For WFL/WFH, X is height
-                            user_x = child_measures['height']
-                        else:
-                            # Standard age_weeks or age_months
-                            user_x = child_measures[user_x_key]
-
-                        fig.add_trace(go.Scatter(
-                            x=user_x, y=child_measures['weight'],
-                            mode='markers+lines', name='Child Data',
-                            marker=dict(size=8, color='#4b9fff'), line=dict(width=2)
-                        ))
-                        fig.update_layout(
-                            title=f"Weight-for-Age ({axis_type})",
-                            xaxis_title=x_label,
-                            yaxis_title="Weight (kg)"
-                        )
-                        st.plotly_chart(fig, width='stretch')
-                    else:
-                        st.warning("WHO WFA standards could not be loaded for this age range.")
-
-                # --- HEIGHT CHART ---
+                # --- TAB 2: HEIGHT ---
                 with chart_tab2:
-                    # FIX #1 & #6: Use shared helper (same stitching logic, consistent max_age)
-                    df_who, x_col, x_label, axis_type, user_x_key = _build_who_reference_for_chart(
-                        gender, 'lhfa', max_age
+                    fig = create_growth_chart(
+                        child_measures=child_measures,
+                        gender=gender,
+                        max_age=max_age,
+                        metric_type='lhfa',
+                        chart_title="Length/Height-for-Age",
+                        y_title="Height (cm)",
+                        y_range=None,        # Auto-scale
+                        y_dtick=5
                     )
+                    if fig: st.plotly_chart(fig, use_container_width=True)
+                    else: st.warning("Standards not loaded.")
 
-                    if df_who is not None and not df_who.empty:
-                        fig = go.Figure()
-                        _add_who_reference_traces(fig, df_who, x_col, z_styles_no_sd1)
-
-                        if user_x_key == "date":
-                            # Calculate days since birth for the X-axis
-                            if 'dob' in child_measures.columns:
-                                dob = pd.to_datetime(child_measures['dob'].iloc[0])
-                                meas_dates = pd.to_datetime(child_measures['date'])
-                                user_x = (meas_dates - dob).dt.days
-                            else:
-                                user_x = child_measures['age_months'] * 30.44
-                        elif user_x_key is None:
-                            # For WFL/WFH, X is height
-                            user_x = child_measures['height']
-                        else:
-                            # Standard age_weeks or age_months
-                            user_x = child_measures[user_x_key]
-                        fig.add_trace(go.Scatter(
-                            x=user_x, y=child_measures['height'],
-                            mode='markers+lines', name='Child Data',
-                            marker=dict(size=8, color='#4b9fff'), line=dict(width=2)
-                        ))
-                        fig.update_layout(
-                            title=f"Length/Height-for-Age ({axis_type})",
-                            xaxis_title=x_label,
-                            yaxis_title="Height (cm)"
-                        )
-                        st.plotly_chart(fig, width='stretch')
-                    else:
-                        st.warning("WHO LHFA standards could not be loaded for this child/age range.")
-
-                # --- WEIGHT FOR LENGTH/HEIGHT CHART ---
+                # --- TAB 3: WEIGHT FOR LENGTH ---
                 with chart_tab3:
-                    # FIX #2: Use shared helper which stitches WFL+WFH for children > 24 months
-                    df_who, x_col, x_label, axis_type, user_x_key = _build_who_reference_for_chart(
-                        gender, 'wfl', max_age
+                    fig = create_growth_chart(
+                        child_measures=child_measures,
+                        gender=gender,
+                        max_age=max_age,
+                        metric_type='wfl',
+                        chart_title="Weight-for-Length/Height",
+                        y_title="Weight (kg)",
+                        y_range=None,
+                        y_dtick=1
                     )
+                    if fig: st.plotly_chart(fig, use_container_width=True)
+                    else: st.warning("Standards not loaded.")
 
-                    if df_who is not None and not df_who.empty:
-                        fig = go.Figure()
-                        _add_who_reference_traces(fig, df_who, x_col, z_styles_no_sd1)
-
-                        if user_x_key == "date":
-                            # Calculate days since birth for the X-axis
-                            if 'dob' in child_measures.columns:
-                                dob = pd.to_datetime(child_measures['dob'].iloc[0])
-                                meas_dates = pd.to_datetime(child_measures['date'])
-                                user_x = (meas_dates - dob).dt.days
-                            else:
-                                user_x = child_measures['age_months'] * 30.44
-                        elif user_x_key is None:
-                            # For WFL/WFH, X is height
-                            user_x = child_measures['height']
-                        else:
-                            # Standard age_weeks or age_months
-                            user_x = child_measures[user_x_key]
-
-                        # x-axis is the child's measured height (cm), not age
-                        fig.add_trace(go.Scatter(
-                            x=child_measures['height'], y=child_measures['weight'],
-                            mode='markers+lines', name='Child Data',
-                            marker=dict(size=8, color='#4b9fff'), line=dict(width=2)
-                        ))
-                        fig.update_layout(
-                            title=f"Weight-for-{axis_type}",
-                            xaxis_title=x_label,
-                            yaxis_title="Weight (kg)"
-                        )
-                        st.plotly_chart(fig, width='stretch')
-                    else:
-                        st.warning("WHO WFL/WFH standards could not be loaded for this age range.")
-
-                # --- HEAD CIRCUMFERENCE FOR AGE ---
+                # --- TAB 4: HEAD CIRCUMFERENCE ---
                 with chart_tab4:
-                    # FIX #1: Use max_age consistently
-                    df_who, x_col, x_label, axis_type, user_x_key = _build_who_reference_for_chart(
-                        gender, 'hcfa', max_age
+                    fig = create_growth_chart(
+                        child_measures=child_measures,
+                        gender=gender,
+                        max_age=max_age,
+                        metric_type='hcfa',
+                        chart_title="Head-Circumference-for-Age",
+                        y_title="Head Circumference (cm)",
+                        y_range=None,
+                        y_dtick=0.5
                     )
+                    if fig: st.plotly_chart(fig, use_container_width=True)
+                    else: st.warning("Standards not loaded.")
 
-                    if df_who is not None and not df_who.empty:
-                        fig = go.Figure()
-                        _add_who_reference_traces(fig, df_who, x_col, z_styles_no_sd1)
-
-                        if user_x_key == "date":
-                            # Calculate days since birth for the X-axis
-                            if 'dob' in child_measures.columns:
-                                dob = pd.to_datetime(child_measures['dob'].iloc[0])
-                                meas_dates = pd.to_datetime(child_measures['date'])
-                                user_x = (meas_dates - dob).dt.days
-                            else:
-                                user_x = child_measures['age_months'] * 30.44
-                        elif user_x_key is None:
-                            # For WFL/WFH, X is height
-                            user_x = child_measures['height']
-                        else:
-                            # Standard age_weeks or age_months
-                            user_x = child_measures[user_x_key]
-                        fig.add_trace(go.Scatter(
-                            x=user_x, y=child_measures['head_circumference'],
-                            mode='markers+lines', name='Child Data',
-                            marker=dict(size=8, color='#4b9fff'), line=dict(width=2)
-                        ))
-                        fig.update_layout(
-                            title=f"Head-Circumference-for-Age ({axis_type})",
-                            xaxis_title=x_label,
-                            yaxis_title="Head Circumference (cm)"
-                        )
-                        st.plotly_chart(fig, width='stretch')
-                    else:
-                        st.warning("WHO HCFA standards could not be loaded for this age range.")
-
-                # --- BMI FOR AGE ---
+                # --- TAB 5: BMI ---
                 with chart_tab5:
-                    # Ensure BMI is calculated
+                    # Ensure BMI exists
                     if 'bmi' not in child_measures.columns or child_measures['bmi'].isna().all():
                         child_measures['bmi'] = child_measures.apply(
                             lambda row: calculate_bmi(row['weight'], row['height']), axis=1
                         )
 
-                    # FIX #1 & #6: Use shared helper (stitches 0-2y + 2-5y); FIX #7: include SD1
-                    df_who, x_col, x_label, axis_type, user_x_key = _build_who_reference_for_chart(
-                        gender, 'bmi', max_age
+                    fig = create_growth_chart(
+                        child_measures=child_measures,
+                        gender=gender,
+                        max_age=max_age,
+                        metric_type='bmi',
+                        chart_title="BMI-for-Age",
+                        y_title="BMI (kg/m²)",
+                        y_range=None,
+                        y_dtick=1
                     )
-
-                    if df_who is not None and not df_who.empty:
-                        fig = go.Figure()
-                        # FIX #7: Use full z_styles (including SD1) for BMI chart only
-                        _add_who_reference_traces(fig, df_who, x_col, z_styles)
-
-                        if user_x_key == "date":
-                            # Calculate days since birth for the X-axis
-                            if 'dob' in child_measures.columns:
-                                dob = pd.to_datetime(child_measures['dob'].iloc[0])
-                                meas_dates = pd.to_datetime(child_measures['date'])
-                                user_x = (meas_dates - dob).dt.days
-                            else:
-                                user_x = child_measures['age_months'] * 30.44
-                        elif user_x_key is None:
-                            # For WFL/WFH, X is height
-                            user_x = child_measures['height']
-                        else:
-                            # Standard age_weeks or age_months
-                            user_x = child_measures[user_x_key]
-                        fig.add_trace(go.Scatter(
-                            x=user_x, y=child_measures['bmi'],
-                            mode='markers+lines', name='Child Data',
-                            marker=dict(size=8, color='#4b9fff'), line=dict(width=2)
-                        ))
-                        fig.update_layout(
-                            title=f"BMI-for-Age ({axis_type})",
-                            xaxis_title=x_label,
-                            yaxis_title="BMI (kg/m²)"
-                        )
-                        st.plotly_chart(fig, width='stretch')
-                    else:
-                        st.warning("WHO BMI standards not available for this age range.")
+                    if fig: st.plotly_chart(fig, use_container_width=True)
+                    else: st.warning("Standards not loaded.")
