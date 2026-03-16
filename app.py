@@ -11,7 +11,7 @@ import os
 st.set_page_config(page_title="Child Growth Tracker", layout="wide")
 
 # Configuration
-BASE_PATH = "./who_metrics"
+BASE_PATH = "./who_expanded_metrics"
 DB_FILE = "growth_tracker.db"
 
 # ==================== DATABASE FUNCTIONS ====================
@@ -105,103 +105,115 @@ def calculate_bmi(weight_kg, height_cm):
         return None
 
 def get_who_standards(gender, metric_type, age_in_months):
-    """Load WHO growth standards from Excel files based on your local layout."""
-    gender_code = gender.lower()
+    """
+    Load WHO growth standards.
+    Robust version: Handles 'table' vs 'tables' and various column headers.
+    """
+    gender_code = "boys" if gender.lower() == "boys" else "girls"
+    
+    # Map app metric types to the new filename prefixes
+    prefix_map = {
+        'bmi': 'bfa',
+        'lhfa': 'lhfa',
+        'wfa': 'wfa',
+        'hcfa': 'hcfa',
+    }
 
-    if metric_type == 'wfa':
-        if age_in_months < 3:
-            age_str = "0-to-13-weeks"
-            axis_type = "Week"
+    if metric_type == 'wfl':
+        if age_in_months > 24:
+            prefix = 'wfh'
         else:
-            age_str = "0-to-5-years"
-            axis_type = "Month"
-        folder_name = "wfa"
-        file_prefix = "wfa"
-
-    elif metric_type == 'lhfa':
-        if age_in_months < 3:
-            age_str = "0-to-13-weeks"
-            axis_type = "Week"
-        elif age_in_months <= 24:
-            age_str = "0-to-2-years"
-            axis_type = "Month"
-        else:
-            age_str = "2-to-5-years"
-            axis_type = "Month"
-        folder_name = "lhfa"
-        file_prefix = "lhfa"
-
-    elif metric_type == 'hcfa':
-        if age_in_months < 3:
-            age_str = "0-13"
-            axis_type = "Week"
-        else:
-            age_str = "0-5"
-            axis_type = "Month"
-        folder_name = "hcfa"
-        file_prefix = "hcfa"
-
-    elif metric_type == 'bmi':
-        if age_in_months < 3:
-            age_str = "0-to-13-weeks"
-            axis_type = "Week"
-        elif age_in_months <= 24:
-            age_str = "0-to-2-years"
-            axis_type = "Month"
-        else:
-            age_str = "2-to-5-years"
-            axis_type = "Month"
-        folder_name = "bmi"
-        file_prefix = "bmi"
-
-    elif metric_type == 'wfl':
-        folder_name = "wfh"
-        if age_in_months <= 24:
-            age_str = "0-to-2-years"
-            axis_type = "Length"
-            file_prefix = "wfl"
-        else:
-            age_str = "2-to-5-years"
-            axis_type = "Height"
-            file_prefix = "wfh"
+            prefix = 'wfl'
     else:
-        return None, None, None
+        if metric_type not in prefix_map:
+            return None, None, None
+        prefix = prefix_map[metric_type]
 
-    filename = f"{file_prefix}_{gender_code}_{age_str}_zscores.xlsx"
-    full_path = os.path.join(BASE_PATH, folder_name, filename)
+    # Construct filename base
+    # We will try multiple variations to handle the user's file naming
+    base_filename = f"{prefix}-{gender_code}-zscore-expanded-table"
+    
+    # Attempt to find a valid file
+    possible_extensions = ['.xlsx', '.xlxs'] # handle common typos
+    possible_suffixes = ['s', ''] # 'tables' or 'table'
+    
+    df = None
+    full_path = ""
+    
+    for ext in possible_extensions:
+        for suffix in possible_suffixes:
+            test_path = os.path.join(BASE_PATH, f"{base_filename}{suffix}{ext}")
+            if os.path.exists(test_path):
+                full_path = test_path
+                break
+        if full_path:
+            break
+            
+    # Fallback: Try strict naming if loop failed (e.g. strict .xlsx with tables)
+    if not full_path:
+        full_path = os.path.join(BASE_PATH, f"{base_filename}s.xlsx")
 
     try:
         df = pd.read_excel(full_path, engine='openpyxl')
         df.columns = [c.strip() for c in df.columns]
 
-        possible_names = ['Month', 'Months', 'Week', 'Weeks', 'Length', 'Height']
+        # Expanded list of possible column names
+        possible_names = [
+            'Day', 'Month', 'Week', 
+            'Length', 'Height', 
+            'Length cm', 'Height cm', 'Length (cm)', 'Height (cm)'
+        ]
+        
         x_col_name = next((n for n in possible_names if n in df.columns), None)
 
         if x_col_name is None:
-            return None, axis_type, None
+            # DEBUG: Print columns to console so we can see what's in the file
+            print(f"⚠️ X-axis column not found in {os.path.basename(full_path)}")
+            print(f"   Available columns: {list(df.columns)}")
+            return None, None, None
 
+        axis_type = x_col_name 
         return df, axis_type, x_col_name
 
+    except FileNotFoundError:
+        print(f"⚠️ File not found: {full_path}")
+        return None, None, None
     except Exception as e:
-        print(f"Error loading WHO standards: {e} | path={full_path}")
+        print(f"⚠️ Error loading WHO standards: {e} | path={full_path}")
         return None, None, None
 
-def _who_x_value(axis_type, age_months, age_weeks):
-    """Return the correct x-axis value based on whether the WHO sheet is week- or month-based."""
-    if axis_type == "Week":
+def _who_x_value(axis_type, age_months, age_weeks, dob=None, meas_date=None):
+    """
+    Return the correct x-axis value based on column type.
+    Added support for 'Day' column.
+    """
+    if axis_type == "Day":
+        # Need total days difference
+        if dob and meas_date:
+            b_ts = pd.to_datetime(dob)
+            r_ts = pd.to_datetime(meas_date)
+            return (r_ts - b_ts).days
+        else:
+            # Fallback approximation if dates aren't passed
+            return age_months * 30.4375
+            
+    elif axis_type == "Week":
         return age_weeks if age_weeks is not None and not pd.isna(age_weeks) else age_months * 4.34524
+        
+    # Month, Length, Height
     return age_months
 
-def get_zscore_from_who(gender, metric_type, age_months, value, age_weeks=None):
+def get_zscore_from_who(gender, metric_type, age_months, value, age_weeks=None, dob=None, meas_date=None):
     """
     Calculate Z-score using WHO SD curves.
-    Uses age_weeks when WHO standard is week-based.
+    Added dob and meas_date arguments for Day-based calculations.
     """
     df, axis_type, x_col = get_who_standards(gender, metric_type, age_months)
     if df is None or df.empty or x_col is None:
         return None
 
-    x_val = _who_x_value(axis_type, age_months, age_weeks)
+    # Pass dob and meas_date here
+    x_val = _who_x_value(axis_type, age_months, age_weeks, dob, meas_date)
 
     df = df.copy()
     df['diff'] = (df[x_col] - x_val).abs()
@@ -224,50 +236,105 @@ def get_zscore_from_who(gender, metric_type, age_months, value, age_weeks=None):
 
     return round((value - m) / sd, 2)
 
-def analyze_trend_from_measurements(measurements, gender, metric):
+def analyze_trend_from_measurements(measurements, gender):
     """
-    Analyze growth trend by computing z-scores over time and fitting a linear slope.
-    metric: 'height' or 'weight'
+    Analyze growth trend based on specific clinical events:
+    1. Flat Growth (No height gain)
+    2. Rapid Weight Gain (Z-score increase >= 2)
+    3. Growth Faltering (Z-score drop >= 1)
+    4. Normal Growth
     """
-    who_metric = 'lhfa' if metric == 'height' else 'wfa'
-
-    # FIX #4: Ensure data is sorted by age before regression
-    measurements = measurements.sort_values('age_months')
-
-    ages = []
-    z_scores = []
-
-    for _, m in measurements.iterrows():
-        age = m.get('age_months')
-        value = m.get(metric)
-
-        if age is None or value is None or pd.isna(age) or pd.isna(value):
-            continue
-
-        z = get_zscore_from_who(
-            gender=gender,
-            metric_type=who_metric,
-            age_months=age,
-            age_weeks=m.get('age_weeks'),
-            value=value
-        )
-
-        if z is not None:
-            ages.append(age)
-            z_scores.append(z)
-
-    if len(z_scores) < 2:
+    if measurements is None or len(measurements) < 2:
         return "Not enough data"
 
-    # Linear regression slope
-    slope = np.polyfit(ages, z_scores, 1)[0]
+    # Ensure data is sorted by date
+    measurements = measurements.sort_values('date')
 
-    if slope < -0.05:
-        return "⚠️ Dropping (Risk)"
-    elif slope > 0.05:
-        return "📈 Rising"
-    else:
-        return "➡️ Stable"
+    # -------------------------------------------------------------------
+    # 1. CHECK FLAT GROWTH CURVE (Raw Height Check)
+    # Criteria: No height gain within an age-specific window (e.g., 3-6 months)
+    # Implementation: Check last 4 months of data. If max height < min height + 0.5cm
+    # -------------------------------------------------------------------
+    latest_date = measurements.iloc[-1]['date']
+    four_months_ago = latest_date - relativedelta(months=4)
+    
+    recent_heights = measurements[measurements['date'] >= four_months_ago]['height']
+    
+    if len(recent_heights) >= 2:
+        # Allow 0.5cm variance for measurement error
+        if recent_heights.max() - recent_heights.min() < 0.5:
+            return "Flat Growth Curve"
+
+    # -------------------------------------------------------------------
+    # 2. CALCULATE Z-SCORE HISTORY (Needed for Delta calculations)
+    # -------------------------------------------------------------------
+    z_weights = []
+    z_heights = []
+
+    for _, row in measurements.iterrows():
+        age_m = row['age_months']
+        age_w = row.get('age_weeks')
+        
+        # Calculate WFA Z-score
+        w_z = get_zscore_from_who(
+            gender=gender, metric_type='wfa', 
+            age_months=age_m, value=row['weight'], age_weeks=age_w,
+            dob=row.get('dob'),       
+            meas_date=row.get('date') 
+        )
+        z_weights.append(w_z)
+
+        # Calculate LHFA Z-score
+        h_z = get_zscore_from_who(
+            gender=gender, metric_type='lhfa', 
+            age_months=age_m, value=row['height'], age_weeks=age_w,
+            dob=row.get('dob'),       
+            meas_date=row.get('date') 
+        )
+        z_heights.append(h_z)
+
+    # Filter out None values for accurate delta calc
+    z_weights = [z for z in z_weights if z is not None]
+    z_heights = [z for z in z_heights if z is not None]
+
+    if not z_weights:
+        return "Not enough data"
+
+    first_z_w = z_weights[0]
+    last_z_w = z_weights[-1]
+    
+    # -------------------------------------------------------------------
+    # 3. CHECK RAPID WEIGHT GAIN
+    # Criteria: Crossing >= 2 centile bands upward (Z-score increase >= 2)
+    # -------------------------------------------------------------------
+    if (last_z_w - first_z_w) >= 2.0:
+        return "Rapid Weight Gain"
+
+    # -------------------------------------------------------------------
+    # 4. CHECK GROWTH FALTERING
+    # Criteria: Drop of >= 1 Z-score in weight OR height over time
+    # -------------------------------------------------------------------
+    faltering = False
+    
+    # Check Weight Faltering
+    if (last_z_w - first_z_w) <= -1.0:
+        faltering = True
+        
+    # Check Height Faltering
+    if z_heights:
+        first_z_h = z_heights[0]
+        last_z_h = z_heights[-1]
+        if (last_z_h - first_z_h) <= -1.0:
+            faltering = True
+
+    if faltering:
+        return "Growth Faltering"
+
+    # -------------------------------------------------------------------
+    # 5. NORMAL GROWTH
+    # Criteria: Stable Z-scores, no faltering, no rapid gain
+    # -------------------------------------------------------------------
+    return "Normal Growth"
 
 # ==================== DATABASE OPERATIONS ====================
 
@@ -644,36 +711,91 @@ def calculate_health_status(measurements_df, gender):
             value=latest_bmi,
             age_weeks=latest_age_w
         )
+        
         if bmi_z is not None:
-            if bmi_z < -3:
-                statuses['bmi'] = 'Severely Wasted'
-            elif bmi_z < -2:
-                statuses['bmi'] = 'Wasted'
-            elif bmi_z <= 1:
-                statuses['bmi'] = 'Normal'
-            elif bmi_z <= 2:
-                statuses['bmi'] = 'Possible Risk of Overweight'
-            elif bmi_z <= 3:
-                statuses['bmi'] = 'Overweight'
+            # --- DIFFERENTIATE AGE GROUPS ---
+            if latest_age_m <= 60:
+                # --- 0-60 Months (Child) - Permenkes + WHO ---
+                if bmi_z < -3:
+                    statuses['bmi'] = 'Severely Wasted'
+                elif bmi_z < -2:
+                    statuses['bmi'] = 'Wasted'
+                elif bmi_z <= 1:
+                    statuses['bmi'] = 'Normal'
+                elif bmi_z <= 2:
+                    statuses['bmi'] = 'Possible Risk of Overweight'
+                elif bmi_z <= 3:
+                    statuses['bmi'] = 'Overweight'
+                else:
+                    statuses['bmi'] = 'Obese'
+            
+            elif latest_age_m > 60:
+                # --- 5-18 Years (Adolescent) - WHO 2007 / IMT/U ---
+                # Note: 5-18 years standards typically go up to +2 or +3 SD.
+                if bmi_z < -3:
+                    statuses['bmi'] = 'Severely Thin'
+                elif bmi_z < -2:
+                    statuses['bmi'] = 'Thinness'
+                elif bmi_z <= 1:
+                    statuses['bmi'] = 'Normal'
+                elif bmi_z <= 2:
+                    statuses['bmi'] = 'Overweight'
+                else:
+                    statuses['bmi'] = 'Obesity'
+    
+    # -----------------------------------------------------------------------
+    # 5. HEAD CIRCUMFERENCE-FOR-AGE (HCFA)
+    # -----------------------------------------------------------------------
+    hcfa_value = latest.get('head_circumference')
+    if hcfa_value is not None and not pd.isna(hcfa_value):
+        hcfa_z = get_zscore_from_who(
+            gender=gender,
+            metric_type='hcfa',
+            age_months=latest_age_m,
+            value=hcfa_value,
+            age_weeks=latest_age_w,
+            dob=latest.get('dob'),
+            meas_date=latest.get('date')
+        )
+        
+        if hcfa_z is not None:
+            # Logic based on provided guidelines (with gap filling for robustness)
+            if hcfa_z < -3:
+                statuses['hcfa'] = 'Small Head Circumference'
+            elif hcfa_z <= -2:
+                # Corrected range to -3 to -2
+                statuses['hcfa'] = 'Mildly Small Head Circumference'
+            elif hcfa_z <= 2:
+                # Covers -2 to +2 (incorporating the specific -1 to +1 guideline)
+                statuses['hcfa'] = 'Normal Head Circumference'
+            elif hcfa_z <= 3:
+                statuses['hcfa'] = 'Larger Head Circumference'
             else:
-                statuses['bmi'] = 'Obese'
+                statuses['hcfa'] = 'Severely Large Head Circumference'
 
     return statuses
 
 def get_trend_analysis(measurements_df, gender):
-    """Calculate trend analysis"""
+    """
+    Calculate trend analysis.
+    Since the new logic considers both height and weight to determine a clinical status,
+    we run the analysis once and apply the result to both metrics.
+    """
     if measurements_df.empty or len(measurements_df) < 2:
         return {
             'height': 'Not enough data',
             'weight': 'Not enough data'
         }
     
-    height_trend = analyze_trend_from_measurements(measurements_df, gender, metric='height')
-    weight_trend = analyze_trend_from_measurements(measurements_df, gender, metric='weight')
+    # Call the unified analysis function
+    # Note: We no longer pass 'metric' because the function checks both internally
+    overall_trend = analyze_trend_from_measurements(measurements_df, gender)
     
+    # Return the same status for both, as the new logic is holistic.
+    # e.g., if Height drops, it flags "Growth Faltering" for the whole child.
     return {
-        'height': height_trend,
-        'weight': weight_trend
+        'height': overall_trend,
+        'weight': overall_trend
     }
 
 def generate_test_data(scenario):
@@ -779,149 +901,38 @@ def generate_test_data(scenario):
 
 def _build_who_reference_for_chart(gender, metric_type, max_age_m):
     """
-    FIX #2 & #6: Build a stitched WHO reference DataFrame for charting,
-    handling the multi-range boundary (e.g. 0-2y + 2-5y) for ALL metric types.
-
-    Returns (df_who, x_col, x_label, axis_type, user_x_key)
-    where user_x_key is 'age_weeks' or 'age_months' (for non-length/height metrics)
-    or None for WFL/WFH (which uses the child's height as x-axis).
+    Build WHO reference DataFrame for charting.
+    Simplified: Uses the 'expanded' files which contain all necessary data ranges.
     """
+    
+    # Determine which file to load (handles WFL vs WFH switch)
+    # Pass max_age_m to help decide wfl vs wfh
+    df_who, axis_type, x_col = get_who_standards(gender, metric_type, max_age_m)
+    
+    if df_who is None or df_who.empty:
+        return None, None, None, None, None
 
-    # --- WFA: single file covers 0-5y (just pick week vs month based on age) ---
-    if metric_type == 'wfa':
-        if max_age_m < 3:
-            df, axis_type, x_col = get_who_standards(gender, 'wfa', 1.0)  # week file
-            return df, x_col, "Age (Weeks)", axis_type, 'age_weeks'
-        else:
-            df, axis_type, x_col = get_who_standards(gender, 'wfa', 6.0)  # month file
-            return df, x_col, "Age (Months)", axis_type, 'age_months'
-
-    # --- LHFA: stitch 0-2y + 2-5y if needed ---
-    elif metric_type == 'lhfa':
-        if max_age_m < 3:
-            df, axis_type, x_col = get_who_standards(gender, 'lhfa', 1.0)
-            return df, x_col, "Age (Weeks)", axis_type, 'age_weeks'
-
+    # Determine label for user
+    if axis_type == "Day":
+        x_label = "Age (Days)"
+    elif axis_type == "Week":
+        x_label = "Age (Weeks)"
+    elif axis_type in ["Length", "Height"]:
+        x_label = f"{axis_type} (cm)"
+    else:
         x_label = "Age (Months)"
-        axis_type = "Month"
 
-        if max_age_m <= 24:
-            df, _, x_col = get_who_standards(gender, 'lhfa', 12.0)
-            if df is not None and x_col is not None and x_col != "Month":
-                df = df.rename(columns={x_col: "Month"})
-            return df, "Month", x_label, axis_type, 'age_months'
-        else:
-            df_0_2, _, x0 = get_who_standards(gender, 'lhfa', 12.0)
-            df_2_5, _, x1 = get_who_standards(gender, 'lhfa', 36.0)
+    # Determine what key from user data maps to the X-axis
+    if axis_type in ["Length", "Height"]:
+        user_x_key = None # Special handling: use child's height
+    elif axis_type == "Day":
+        user_x_key = "date" # We will calculate diff from date
+    elif axis_type == "Week":
+        user_x_key = "age_weeks"
+    else:
+        user_x_key = "age_months"
 
-            if df_0_2 is not None and x0 is not None and x0 != "Month":
-                df_0_2 = df_0_2.rename(columns={x0: "Month"})
-            if df_2_5 is not None and x1 is not None and x1 != "Month":
-                df_2_5 = df_2_5.rename(columns={x1: "Month"})
-
-            if df_0_2 is not None and not df_0_2.empty and df_2_5 is not None and not df_2_5.empty:
-                df_stitched = (
-                    pd.concat([
-                        df_0_2[df_0_2["Month"] <= 24],
-                        df_2_5[df_2_5["Month"] >= 24]
-                    ], ignore_index=True)
-                    .drop_duplicates(subset=["Month"])
-                    .sort_values("Month")
-                )
-                return df_stitched, "Month", x_label, axis_type, 'age_months'
-            elif df_0_2 is not None and not df_0_2.empty:
-                return df_0_2, "Month", x_label, axis_type, 'age_months'
-            elif df_2_5 is not None and not df_2_5.empty:
-                return df_2_5, "Month", x_label, axis_type, 'age_months'
-            return None, "Month", x_label, axis_type, 'age_months'
-
-    # --- HCFA: single file per range ---
-    elif metric_type == 'hcfa':
-        if max_age_m < 3:
-            df, axis_type, x_col = get_who_standards(gender, 'hcfa', 1.0)
-            return df, x_col, "Age (Weeks)", axis_type, 'age_weeks'
-        else:
-            df, axis_type, x_col = get_who_standards(gender, 'hcfa', 6.0)
-            return df, x_col, "Age (Months)", axis_type, 'age_months'
-
-    # --- BMI: stitch 0-2y + 2-5y if needed ---
-    elif metric_type == 'bmi':
-        if max_age_m < 3:
-            df, axis_type, x_col = get_who_standards(gender, 'bmi', 1.0)
-            return df, x_col, "Age (Weeks)", axis_type, 'age_weeks'
-
-        x_label = "Age (Months)"
-        axis_type = "Month"
-
-        if max_age_m <= 24:
-            df, _, x_col = get_who_standards(gender, 'bmi', 12.0)
-            if df is not None and x_col is not None and x_col != "Month":
-                df = df.rename(columns={x_col: "Month"})
-            return df, "Month", x_label, axis_type, 'age_months'
-        else:
-            df_0_2, _, x0 = get_who_standards(gender, 'bmi', 12.0)
-            df_2_5, _, x1 = get_who_standards(gender, 'bmi', 36.0)
-
-            if df_0_2 is not None and x0 is not None and x0 != "Month":
-                df_0_2 = df_0_2.rename(columns={x0: "Month"})
-            if df_2_5 is not None and x1 is not None and x1 != "Month":
-                df_2_5 = df_2_5.rename(columns={x1: "Month"})
-
-            if df_0_2 is not None and not df_0_2.empty and df_2_5 is not None and not df_2_5.empty:
-                df_stitched = (
-                    pd.concat([
-                        df_0_2[df_0_2["Month"] <= 24],
-                        df_2_5[df_2_5["Month"] >= 24]
-                    ], ignore_index=True)
-                    .drop_duplicates(subset=["Month"])
-                    .sort_values("Month")
-                )
-                return df_stitched, "Month", x_label, axis_type, 'age_months'
-            elif df_0_2 is not None and not df_0_2.empty:
-                return df_0_2, "Month", x_label, axis_type, 'age_months'
-            elif df_2_5 is not None and not df_2_5.empty:
-                return df_2_5, "Month", x_label, axis_type, 'age_months'
-            return None, "Month", x_label, axis_type, 'age_months'
-
-    # --- WFL/WFH: stitch 0-2y length + 2-5y height reference if needed ---
-    elif metric_type == 'wfl':
-        # x-axis is the child's measured length/height (cm), NOT age
-        if max_age_m <= 24:
-            df, axis_type, x_col = get_who_standards(gender, 'wfl', 12.0)
-            x_label = f"{axis_type} (cm)"
-            return df, x_col, x_label, axis_type, None  # None = x is child height
-        else:
-            # FIX #2: Stitch WFL (0-2y, length-based) and WFH (2-5y, height-based)
-            df_wfl, _, x_wfl = get_who_standards(gender, 'wfl', 12.0)   # Length axis
-            df_wfh, _, x_wfh = get_who_standards(gender, 'wfl', 36.0)   # Height axis
-
-            # Normalise x column to "Length_Height" for merge
-            std_col = "Length_Height"
-            if df_wfl is not None and x_wfl is not None:
-                df_wfl = df_wfl.rename(columns={x_wfl: std_col})
-            if df_wfh is not None and x_wfh is not None:
-                df_wfh = df_wfh.rename(columns={x_wfh: std_col})
-
-            if df_wfl is not None and not df_wfl.empty and df_wfh is not None and not df_wfh.empty:
-                # WFL covers ~45-110 cm; WFH covers ~65-120 cm; stitch at 110 cm overlap
-                # Use WFL for <=110 cm and WFH for >110 cm to avoid duplicates
-                wfl_max = df_wfl[std_col].max()
-                df_stitched = (
-                    pd.concat([
-                        df_wfl[df_wfl[std_col] <= wfl_max],
-                        df_wfh[df_wfh[std_col] > wfl_max]
-                    ], ignore_index=True)
-                    .drop_duplicates(subset=[std_col])
-                    .sort_values(std_col)
-                )
-                return df_stitched, std_col, "Length/Height (cm)", "Length/Height", None
-            elif df_wfl is not None and not df_wfl.empty:
-                return df_wfl, std_col, "Length (cm)", "Length", None
-            elif df_wfh is not None and not df_wfh.empty:
-                return df_wfh, std_col, "Height (cm)", "Height", None
-            return None, std_col, "Length/Height (cm)", "Length/Height", None
-
-    return None, None, None, None, None
+    return df_who, x_col, x_label, axis_type, user_x_key
 
 
 def _add_who_reference_traces(fig, df_who, x_col, z_styles):
@@ -1173,13 +1184,34 @@ with tab2:
                     "Risk of Overweight":         "> +1 SD. Monitor diet and activity (Permenkes).",
                     "Overweight":                 "> +2 SD. Above healthy weight. Review diet.",
                     "Obese":                      "> +3 SD. Significantly above healthy weight.",
-                    # WFL/WFH & BMI-for-age shared
+                    # WFL/WFH 
                     "Severely Wasted":            "< −3 SD. Critical malnutrition. Needs immediate doctor.",
                     "Wasted":                     "−3 to < −2 SD. Malnourished. Needs diet improvement.",
                     "Normal":                     "−2 to +1 SD. Healthy nutritional status.",
                     "Possible Risk of Overweight":"≥ +1 to +2 SD. Monitor closely (Permenkes + WHO).",
-                    # Obese & Overweight already defined above
-                    # Fallback
+                    # BMI
+                    # 0-60 Months
+                    "Severely Wasted":            "< −3 SD. Critical malnutrition. Needs immediate doctor.",
+                    "Wasted":                     "−3 to < −2 SD. Malnourished. Needs diet improvement.",
+                    "Normal":                     "−2 to +1 SD. Healthy nutritional status.",
+                    "Possible Risk of Overweight":"≥ +1 to +2 SD. Monitor closely (Permenkes + WHO).",
+                    
+                    # 5-18 Years (New)
+                    "Severely Thin":              "< −3 SD. Severely thin. Requires medical assessment.",
+                    "Thinness":                   "−3 to < −2 SD. Thin. Review nutritional intake.",
+                    "Overweight":                 "> +1 to +2 SD. Overweight. Increase physical activity.",
+                    "Obesity":                    "> +2 SD. Obesity. High risk of metabolic diseases.",
+                    
+                    # HCFA
+                    "Small Head Circumference":     "< -3 SD. Severely small head size. Consult pediatrician.",
+                    "Mildly Small Head Circumference": "-3 to -2 SD. Below average size. Monitor growth.",
+                    "Normal Head Circumference":    "-2 to +2 SD. Head size is within healthy range.",
+                    "Larger Head Circumference":    "+2 to +3 SD. Above average size. Usually benign, but monitor.",
+                    "Severely Large Head Circumference": "> +3 SD. Significantly large. Medical assessment recommended.",
+
+                    # Shared
+                    "Overweight":                 "Above healthy weight. Review diet.",
+                    "Obese":                      "Significantly above healthy weight.",
                     "No Data":                    "Insufficient data to analyze.",
                 }
 
@@ -1188,37 +1220,51 @@ with tab2:
                 latest_height = latest['height']
                 latest_bmi = latest.get('bmi') or calculate_bmi(latest_weight, latest_height)
 
-                health_status = calculate_health_status(child_measures, gender)
+                # Calculate status if not already done above
+                if 'health_status' not in locals():
+                    health_status = calculate_health_status(child_measures, gender)
 
                 st.subheader("📊 Health & Trend Overview")
 
-                status_col, trend_col = st.columns([1, 1])
+                status_col, trend_col = st.columns([2, 1])
 
                 with status_col:
                     st.markdown("### 🏥 Current Status")
 
-                    # Row 1: LFA/HFA  |  WFA
-                    g_col, w_col = st.columns(2)
+                    # Row 1: Growth, Weight, Head Circumference (3 Cols)
+                    g_col, w_col, bmi_col = st.columns(3)
+                    
                     with g_col:
                         growth_status = health_status.get('growth', 'No Data')
-                        st.metric("Length/Height-for-Age", growth_status)
+                        st.metric("Length/Height", growth_status)
                         st.caption(status_meanings.get(growth_status, ""))
+                        
                     with w_col:
                         wfa_status = health_status.get('wfa', 'No Data')
-                        st.metric("Weight-for-Age", wfa_status)
+                        st.metric("Weight", wfa_status)
                         st.caption(status_meanings.get(wfa_status, ""))
 
-                    # Row 2: WFL/WFH  |  BMI-for-Age
-                    wfl_col, bmi_col = st.columns(2)
+                    with bmi_col:
+                        if latest_bmi:
+                            bmi_status = health_status.get('bmi', 'No Data')
+                            st.metric("BMI", f"{bmi_status}")
+                            st.caption(status_meanings.get(bmi_status, ""))   
+                    
+
+                    # Row 2: WFL/WFH  |  BMI-for-Age (2 Cols)
+                    wfl_col, h_col = st.columns([1, 2])
+                    
                     with wfl_col:
                         wfl_status = health_status.get('wfl', 'No Data')
                         st.metric("Weight-for-Length/Height", wfl_status)
                         st.caption(status_meanings.get(wfl_status, ""))
-                    with bmi_col:
-                        if latest_bmi:
-                            bmi_status = health_status.get('bmi', 'No Data')
-                            st.metric("BMI-for-Age", f"{bmi_status} ({latest_bmi:.1f})")
-                            st.caption(status_meanings.get(bmi_status, ""))
+                    
+                    with h_col:
+                        hcfa_status = health_status.get('hcfa', 'No Data')
+                        st.metric("Head Circumference", hcfa_status)
+                        st.caption(status_meanings.get(hcfa_status, ""))
+                        
+                    
 
                     st.caption(f"*Based on: {latest['date'].date()}*")
 
@@ -1226,10 +1272,11 @@ with tab2:
                     st.markdown("### 📈 Trend Analysis")
                     
                     trend_meanings = {
-                        "⚠️ Dropping (Risk)": "Child's growth percentile is decreasing. Predicts risk of stunting.",
-                        "📈 Rising": "Child is improving across percentiles.",
-                        "➡️ Stable": "Child is maintaining their growth curve.",
-                        "Not enough data": "Need more than 1 record to see trend.",
+                        "Flat Growth Curve": "No height gain detected in the last 4 months. Could indicate nutritional deficiency or chronic health issues.",
+                        "Rapid Weight Gain": "Weight has crossed upward by ≥2 centile bands. Monitor for overfeeding or sedentary lifestyle risks.",
+                        "Growth Faltering": "Z-score has dropped by ≥1. This indicates growth slowing down, possibly due to malnutrition or illness.",
+                        "Normal Growth": "Stable Z-scores with a consistent growth curve. Child is growing as expected.",
+                        "Not enough data": "Need at least 2 records to analyze trend.",
                     }
                     
                     trend_analysis = get_trend_analysis(child_measures, gender)
@@ -1282,7 +1329,21 @@ with tab2:
                         fig = go.Figure()
                         _add_who_reference_traces(fig, df_who, x_col, z_styles_no_sd1)
 
-                        user_x = child_measures[user_x_key]
+                        if user_x_key == "date":
+                            # Calculate days since birth for the X-axis
+                            if 'dob' in child_measures.columns:
+                                dob = pd.to_datetime(child_measures['dob'].iloc[0])
+                                meas_dates = pd.to_datetime(child_measures['date'])
+                                user_x = (meas_dates - dob).dt.days
+                            else:
+                                user_x = child_measures['age_months'] * 30.44
+                        elif user_x_key is None:
+                            # For WFL/WFH, X is height
+                            user_x = child_measures['height']
+                        else:
+                            # Standard age_weeks or age_months
+                            user_x = child_measures[user_x_key]
+
                         fig.add_trace(go.Scatter(
                             x=user_x, y=child_measures['weight'],
                             mode='markers+lines', name='Child Data',
@@ -1308,7 +1369,20 @@ with tab2:
                         fig = go.Figure()
                         _add_who_reference_traces(fig, df_who, x_col, z_styles_no_sd1)
 
-                        user_x = child_measures[user_x_key]
+                        if user_x_key == "date":
+                            # Calculate days since birth for the X-axis
+                            if 'dob' in child_measures.columns:
+                                dob = pd.to_datetime(child_measures['dob'].iloc[0])
+                                meas_dates = pd.to_datetime(child_measures['date'])
+                                user_x = (meas_dates - dob).dt.days
+                            else:
+                                user_x = child_measures['age_months'] * 30.44
+                        elif user_x_key is None:
+                            # For WFL/WFH, X is height
+                            user_x = child_measures['height']
+                        else:
+                            # Standard age_weeks or age_months
+                            user_x = child_measures[user_x_key]
                         fig.add_trace(go.Scatter(
                             x=user_x, y=child_measures['height'],
                             mode='markers+lines', name='Child Data',
@@ -1333,6 +1407,21 @@ with tab2:
                     if df_who is not None and not df_who.empty:
                         fig = go.Figure()
                         _add_who_reference_traces(fig, df_who, x_col, z_styles_no_sd1)
+
+                        if user_x_key == "date":
+                            # Calculate days since birth for the X-axis
+                            if 'dob' in child_measures.columns:
+                                dob = pd.to_datetime(child_measures['dob'].iloc[0])
+                                meas_dates = pd.to_datetime(child_measures['date'])
+                                user_x = (meas_dates - dob).dt.days
+                            else:
+                                user_x = child_measures['age_months'] * 30.44
+                        elif user_x_key is None:
+                            # For WFL/WFH, X is height
+                            user_x = child_measures['height']
+                        else:
+                            # Standard age_weeks or age_months
+                            user_x = child_measures[user_x_key]
 
                         # x-axis is the child's measured height (cm), not age
                         fig.add_trace(go.Scatter(
@@ -1360,7 +1449,20 @@ with tab2:
                         fig = go.Figure()
                         _add_who_reference_traces(fig, df_who, x_col, z_styles_no_sd1)
 
-                        user_x = child_measures[user_x_key]
+                        if user_x_key == "date":
+                            # Calculate days since birth for the X-axis
+                            if 'dob' in child_measures.columns:
+                                dob = pd.to_datetime(child_measures['dob'].iloc[0])
+                                meas_dates = pd.to_datetime(child_measures['date'])
+                                user_x = (meas_dates - dob).dt.days
+                            else:
+                                user_x = child_measures['age_months'] * 30.44
+                        elif user_x_key is None:
+                            # For WFL/WFH, X is height
+                            user_x = child_measures['height']
+                        else:
+                            # Standard age_weeks or age_months
+                            user_x = child_measures[user_x_key]
                         fig.add_trace(go.Scatter(
                             x=user_x, y=child_measures['head_circumference'],
                             mode='markers+lines', name='Child Data',
@@ -1393,7 +1495,20 @@ with tab2:
                         # FIX #7: Use full z_styles (including SD1) for BMI chart only
                         _add_who_reference_traces(fig, df_who, x_col, z_styles)
 
-                        user_x = child_measures[user_x_key]
+                        if user_x_key == "date":
+                            # Calculate days since birth for the X-axis
+                            if 'dob' in child_measures.columns:
+                                dob = pd.to_datetime(child_measures['dob'].iloc[0])
+                                meas_dates = pd.to_datetime(child_measures['date'])
+                                user_x = (meas_dates - dob).dt.days
+                            else:
+                                user_x = child_measures['age_months'] * 30.44
+                        elif user_x_key is None:
+                            # For WFL/WFH, X is height
+                            user_x = child_measures['height']
+                        else:
+                            # Standard age_weeks or age_months
+                            user_x = child_measures[user_x_key]
                         fig.add_trace(go.Scatter(
                             x=user_x, y=child_measures['bmi'],
                             mode='markers+lines', name='Child Data',
