@@ -1263,10 +1263,6 @@ with tab2:
                         hcfa_status = health_status.get('hcfa', 'No Data')
                         st.metric("Head Circumference", hcfa_status)
                         st.caption(status_meanings.get(hcfa_status, ""))
-                        
-                    
-
-                    st.caption(f"*Based on: {latest['date'].date()}*")
 
                 with trend_col:
                     st.markdown("### 📈 Trend Analysis")
